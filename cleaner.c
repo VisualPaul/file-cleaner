@@ -1,14 +1,15 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <sys/stat.h>
-#include <dirent.h>
-#include <string.h>
 #include <assert.h>
-#include <unistd.h>
-#include <fcntl.h>
+#include <ctype.h>
+#include <dirent.h>
 #include <err.h>
 #include <errno.h>
-#include <ctype.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <readline/readline.h>
 #include <readline/history.h>
 
@@ -220,7 +221,8 @@ void build_size_representation(char *str, off_t size)
     }
 }
 
-char *extract_name(char *line) {
+char *extract_name(char *line)
+{
     char *start = line;
     char *end = line;
     while (*end) {
