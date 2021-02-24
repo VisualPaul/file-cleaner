@@ -130,18 +130,6 @@ struct file *do_merge_sort(struct file *files, off_t n)
     return merge(do_merge_sort(files, m), do_merge_sort(rest, n - m));
 }
 
-void check_subdirs(struct directory *directory, off_t original_count)
-{
-    off_t sorted_count = 0;
-    uint64_t max_size = UINT64_MAX;
-    for (struct file *cur = directory->subdirs; cur; cur = cur->next) {
-        ++sorted_count;
-        assert(cur->size <= max_size);
-        max_size = cur->size;
-    }
-    assert(sorted_count == original_count);
-}
-
 struct file *sorted_subdirs(struct directory *directory)
 {
     if (!directory->subdirs_sorted) {
@@ -150,7 +138,6 @@ struct file *sorted_subdirs(struct directory *directory)
             ++count;
         }
         directory->subdirs = do_merge_sort(directory->subdirs, count);
-        check_subdirs(directory, count);
         directory->subdirs_sorted = 1;
     }
     return directory->subdirs;
