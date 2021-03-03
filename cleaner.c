@@ -4,6 +4,7 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,7 +30,8 @@ struct file {
 struct directory {
     struct file file;
     struct file *subdirs;
-    uint8_t subdirs_sorted;
+    off_t self_size;
+    bool subdirs_sorted;
 };
 
 char *concat_path(const char *path_a, const char *path_b)
@@ -139,7 +141,7 @@ struct file *sorted_subdirs(struct directory *directory)
             ++count;
         }
         directory->subdirs = do_merge_sort(directory->subdirs, count);
-        directory->subdirs_sorted = 1;
+        directory->subdirs_sorted = true;
     }
     return directory->subdirs;
 }
@@ -168,6 +170,7 @@ struct file *build_tree(const char *path)
     file->size = st.st_size;
     if (S_ISDIR(st.st_mode)) {
         DIR *dir = opendir(path);
+        directory->self_size = file->size;
         if (dir) {
             directory->subdirs = NULL;
             struct dirent *dirent;
@@ -190,7 +193,7 @@ struct file *build_tree(const char *path)
                 free(subpath);
             }
             closedir(dir);
-            directory->subdirs_sorted = 0;
+            directory->subdirs_sorted = false;
         } else {
             file->type |= DIRECTORY_UNLISTABLE;
             directory->subdirs = NULL;
@@ -212,7 +215,7 @@ void build_size_representation(char *str, off_t size)
     sprintf(str, "%.2f%cB", d_size, PREFIXES[prefix_count]);
 }
 
-    char *trim_name(const char *name)
+char *trim_name(const char *name)
 {
     if (name[0] == '.' && name[1] == '/') {
         return (char *) (name + 2);
@@ -287,14 +290,145 @@ struct file *next_entity(struct file *f, const char *s)
     return NULL;
 }
 
+void update_size(struct directory *d)
+{
+    assert(d);
+    d->subdirs_sorted = false;
+    d->file.size = d->self_size;
+    for (struct file *f = d->subdirs; f; f = f->next) {
+        d->file.size += f->size;
+    }
+}
+
+bool remove_file_internal(struct file *f, bool remove_parent)
+{
+    bool result = true;
+    if (f->type & (S_IFDIR >> FILE_TYPE_OFFSET)) {
+        struct directory *d = (struct directory *)f;
+        struct file **subdirs = &d->subdirs;
+        while (*subdirs) {
+            struct file *nxt = (*subdirs)->next;
+            if (remove_file_internal(*subdirs, false)) {
+                free(*subdirs);
+                *subdirs = nxt;
+            } else {
+                subdirs = &(*subdirs)->next;
+                result = false;
+            }
+        }
+
+        if (!result) {
+            fprintf(stderr, "[WARNING] skipping %s; not all children removed\n",
+                f->name);
+        } else {
+            if (rmdir(f->name) != 0) {
+                err(errno, "[ERROR] cannot remove %s; skipping", f->name);
+                result = false;
+            }
+        }
+        update_size(d);
+    } else {
+        if (unlink(f->name) != 0) {
+            if (rmdir(f->name) != 0) {
+                err(errno, "[ERROR] cannot remove %s; skipping", f->name);
+                result = false;
+            }
+        }
+    }
+    struct directory *parent = f->parent;
+    if (result && remove_parent) {
+        struct directory *d = parent;
+        if (d) {
+            struct file **subdirs = &d->subdirs;
+            while (*subdirs) {
+                struct file *nxt = (*subdirs)->next;
+                if (*subdirs == f) {
+                    *subdirs = nxt;
+                } else {
+                    subdirs = &(*subdirs)->next;
+                }
+            }
+        }
+        free(f);
+    }
+
+    if (remove_parent) {
+        struct directory *d = parent;
+        while (d) {
+            update_size(d);
+            d = d->file.parent;
+        }
+    }
+    return result;
+}
+
+bool remove_file(struct file *f)
+{
+    return remove_file_internal(f, true);
+}
+
+bool is_empty_line(const char *s)
+{
+    if (!s) {
+        return true;
+    }
+    for(; *s; ++s) {
+        if (!isspace(*s)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+struct file *process_rm(struct file *cur, char *line)
+{
+    struct file *to_remove;
+    if (is_empty_line(line)) {
+        to_remove = cur;
+    } else {
+        to_remove = next_entity(cur, line);
+    }
+    struct file *parent = &to_remove->parent->file;
+    remove_file(to_remove);
+    if (parent == NULL) {
+        fprintf(stderr, "[INFO] removed root directory; exiting\n");
+    }
+    return parent;
+}
+
+void process_help(char *line)
+{
+    if (!is_empty_line(line)) {
+        fprintf(stderr, "[ERROR] wrong command: /help %s\n", line);
+        return;
+    }
+    puts("Enter file name to go to this directory or .. to go up one level");
+    puts("/rm [file] to remove file or current directory if not stated");
+    puts("/help to display this message");
+}
+
+struct file *process_command(struct file *cur, char *line)
+{
+    char *cmd = strsep(&line, " \t\n");
+    if (strcmp(cmd, "/rm") == 0) {
+        return process_rm(cur, line);
+    } else if (strcmp(cmd, "/help") == 0) {
+        process_help(line);
+        return cur;
+    } else {
+        fprintf(stderr, "command not recognized: %s\n", cmd);
+        return cur;
+    }
+}
+
 int main(int argc, char **argv)
 {
-    const char *base_path;
+    char *base_path;
     int exit_code = 0;
     if (argc == 1) {
-        base_path = ".";
+        base_path = getcwd(NULL, 0);
     } else if (argc == 2) {
-        base_path = argv[1];
+        base_path = realpath(argv[1], NULL);
     } else {
         fprintf(stderr, "[ERROR] incorrect arguments\n");
         exit_code = 1;
@@ -304,7 +438,7 @@ int main(int argc, char **argv)
     if (original_wd_fd == -1) {
         err(errno, "can't open current directory");
         exit_code = 1;
-        goto exit_vanilla;
+        goto exit_deallocate_path;
     }
     printf("[INFO] building tree, please wait\n");
     struct file *tree = build_tree(base_path);
@@ -322,15 +456,22 @@ int main(int argc, char **argv)
         if (!line) {
             break;
         }
-        char *name = extract_name(line);
-        struct file *nxt = next_entity(cur, name);
-        if (!nxt) {
-            fprintf(stderr, "[ERROR] no such file: %s\n", name);
+        if (*line == '/') {
+            cur = process_command(cur, line);
+            if (cur == NULL) {
+                exit_code = 0;
+                goto exit_tree;
+            }
+        } else {
+            char *name = extract_name(line);
+            struct file *nxt = next_entity(cur, name);
+            if (!nxt) {
+                fprintf(stderr, "[ERROR] no such file: %s\n", name);
+            } else {
+                cur = nxt;
+            }
         }
         free(line);
-        if (nxt) {
-            cur = nxt;
-        }
     }
 
 exit_tree:
@@ -338,6 +479,8 @@ exit_tree:
 exit_original_fd:
     fchdir(original_wd_fd);
     close(original_wd_fd);
+exit_deallocate_path:
+    free(base_path);
 exit_vanilla:
     return exit_code;
 }
