@@ -1,2 +1,4 @@
 *.o
 cleaner
+.DS_Store
+*.dSYM
